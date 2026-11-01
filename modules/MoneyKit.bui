@@ -1,0 +1,209 @@
+Public Enum MoneyRoundingMode As Integer
+    HalfEven = 0
+    HalfAway = 1
+    TowardZero = 2
+    Floor = 3
+    Ceiling = 4
+End Enum
+
+' Internal quotients and remainders are nonpositive, including Int64 minimum.
+Private Class MoneyKitDivision
+    Public Property Quotient As Integer = 0
+    Public Property Remainder As Integer = 0
+End Class
+
+''' Exact fixed-scale Currency utilities. No floating-point arithmetic.
+Public Class Money
+    Private Shared Function NegativeMagnitude(n As Integer) As Integer
+        If n > 0 Then Return -n
+        Return n
+    End Function
+
+    Private Shared Function StepFor(digits As Integer) As Integer
+        If digits < 0 Or digits > 4 Then Throw New InvalidArgumentException("digits must be 0..4")
+        Dim stepSize As Integer = 1
+        For i As Integer = digits To 3
+            stepSize *= 10
+        Next
+        Return stepSize
+    End Function
+
+    Private Shared Sub ValidateMode(mode As MoneyRoundingMode)
+        Dim n As Integer = CType(mode, Integer)
+        If n < 0 Or n > 4 Then Throw New InvalidArgumentException("Unknown money rounding mode")
+    End Sub
+
+    ' Five base-32768 limbs cover every Int64 magnitude, including 2^63.
+    Private Shared Function Limbs(n As Integer) As Array Of Integer
+        Dim division As Array Of Integer = []
+        Dim remaining As Integer = Money.NegativeMagnitude(n)
+        For i As Integer = 0 To 4
+            Array.Append(division, -(remaining Mod 32768))
+            remaining = remaining \ 32768
+        Next
+        Return division
+    End Function
+
+    ' Exact magnitude product and binary long division. Remainder doubling uses
+    ' subtraction against the divisor to keep every intermediate in Int64.
+    Private Shared Function DivideProduct(a As Integer, b As Integer, denominator As Integer) As MoneyKitDivision
+        If denominator = 0 Then Throw New DivideByZeroException("Zero money denominator")
+        Dim left As Array Of Integer = Money.Limbs(a)
+        Dim right As Array Of Integer = Money.Limbs(b)
+        Dim product As Array Of Integer = []
+        For i As Integer = 0 To 9
+            Array.Append(product, 0)
+        Next
+        For i As Integer = 0 To 4
+            For j As Integer = 0 To 4
+                product(i + j) += left(i) * right(j)
+            Next
+        Next
+        For i As Integer = 0 To 8
+            product(i + 1) += product(i) \ 32768
+            product(i) = product(i) Mod 32768
+        Next
+        Dim division As New MoneyKitDivision()
+        Dim divisor As Integer = Money.NegativeMagnitude(denominator)
+        For i As Integer = 9 To 0 Step -1
+            Dim bitPlace As Integer = 16384
+            While bitPlace > 0
+                Dim bit As Integer = (product(i) \ bitPlace) Mod 2
+                Dim quotientBit As Integer = 0
+                If division.Remainder <= divisor - division.Remainder Then
+                    division.Remainder -= divisor - division.Remainder
+                    quotientBit = 1
+                Else
+                    division.Remainder += division.Remainder
+                End If
+                If bit = 1 Then
+                    If division.Remainder = divisor + 1 Then
+                        division.Remainder = 0
+                        quotientBit = 1
+                    Else
+                        division.Remainder -= 1
+                    End If
+                End If
+                If division.Quotient < -4611686018427387904 Then Throw New OverflowException("Money quotient overflow")
+                If division.Quotient = -4611686018427387904 And quotientBit = 1 Then Throw New OverflowException("Money quotient overflow")
+                division.Quotient = division.Quotient * 2 - quotientBit
+                bitPlace = bitPlace \ 2
+            End While
+        Next
+        Return division
+    End Function
+
+    Private Shared Function Rounded(division As MoneyKitDivision, denominator As Integer, negative As Boolean, mode As MoneyRoundingMode) As Integer
+        Money.ValidateMode(mode)
+        Dim increment As Boolean = False
+        Dim remainder As Integer = division.Remainder
+        Dim divisor As Integer = Money.NegativeMagnitude(denominator)
+        If remainder <> 0 Then
+            Select Case mode
+                Case MoneyRoundingMode.HalfEven
+                    increment = remainder < divisor - remainder Or (remainder = divisor - remainder And division.Quotient Mod 2 <> 0)
+                Case MoneyRoundingMode.HalfAway
+                    increment = remainder <= divisor - remainder
+                Case MoneyRoundingMode.Floor
+                    increment = negative
+                Case MoneyRoundingMode.Ceiling
+                    increment = Not negative
+            End Select
+        End If
+        Dim q As Integer = division.Quotient
+        If increment Then
+            If q = (-9223372036854775807 - 1) Then Throw New OverflowException("Money rounding overflow")
+            q -= 1
+        End If
+        If negative Then Return q
+        If q = (-9223372036854775807 - 1) Then Throw New OverflowException("Positive money overflow")
+        Return -q
+    End Function
+
+    Public Shared Function MultiplyRate(amount As Currency, numerator As Integer, denominator As Integer, mode As MoneyRoundingMode = MoneyRoundingMode.HalfEven) As Currency
+        Money.ValidateMode(mode)
+        Dim raw As Integer = amount.ToMinorUnits()
+        Dim negative As Boolean = (raw < 0) Xor (numerator < 0) Xor (denominator < 0)
+        Dim division As MoneyKitDivision = Money.DivideProduct(raw, numerator, denominator)
+        Return Currency.FromMinorUnits(Money.Rounded(division, denominator, negative, mode))
+    End Function
+
+    Public Shared Function Percent(amount As Currency, percentage As Integer, mode As MoneyRoundingMode = MoneyRoundingMode.HalfEven) As Currency
+        Return Money.MultiplyRate(amount, percentage, 100, mode)
+    End Function
+
+    Public Shared Function Round(amount As Currency, digits As Integer = 2, mode As MoneyRoundingMode = MoneyRoundingMode.HalfEven) As Currency
+        Money.ValidateMode(mode)
+        Dim stepSize As Integer = Money.StepFor(digits)
+        Dim raw As Integer = amount.ToMinorUnits()
+        Dim division As MoneyKitDivision = Money.DivideProduct(raw, 1, stepSize)
+        Dim units As Integer = Money.Rounded(division, stepSize, raw < 0, mode)
+        If units > 9223372036854775807 \ stepSize Or units < (-9223372036854775807 - 1) \ stepSize Then Throw New OverflowException("Rounded money outside Currency range")
+        Return Currency.FromMinorUnits(units * stepSize)
+    End Function
+
+    ''' Plain decimal text with exactly digits fractional places, rounded first.
+    Public Shared Function Format(amount As Currency, digits As Integer = 2, mode As MoneyRoundingMode = MoneyRoundingMode.HalfEven) As String
+        Dim roundedAmount As Currency = Money.Round(amount, digits, mode)
+        Dim raw As Integer = roundedAmount.ToMinorUnits()
+        Dim magnitude As Integer = Money.NegativeMagnitude(raw)
+        Dim whole As Integer = -(magnitude \ 10000)
+        Dim fraction As Integer = -(magnitude Mod 10000)
+        Dim text As String = Str(whole)
+        If raw < 0 Then text = "-" + text
+        If digits = 0 Then Return text
+        Dim tail As String = ""
+        Dim place As Integer = 1000
+        For i As Integer = 1 To digits
+            tail += Str((fraction \ place) Mod 10)
+            place = place \ 10
+        Next
+        Return text + "." + tail
+    End Function
+
+    ''' Snapshot weights; largest remainder, stable input-order ties; total must
+    ''' already be representable at digits precision. Raw-unit precision is 4.
+    Public Shared Function Allocate(total As Currency, weights As Array Of Integer, digits As Integer = 4) As Array Of Currency
+        Dim stepSize As Integer = Money.StepFor(digits)
+        Dim raw As Integer = total.ToMinorUnits()
+        If raw Mod stepSize <> 0 Then Throw New InvalidArgumentException("Total not aligned to allocation precision")
+        Dim count As Integer = Array.Count(weights)
+        If count < 1 Or count > 10000 Then Throw New InvalidArgumentException("Allocate needs 1..10000 weights")
+        Dim snapshot As Array Of Integer = []
+        Dim sum As Integer = 0
+        For Each weight As Integer In weights
+            If weight <= 0 Then Throw New InvalidArgumentException("Weights must be positive")
+            Array.Append(snapshot, weight)
+        Next
+        For Each weight As Integer In snapshot
+            If sum > 9223372036854775807 - weight Then Throw New OverflowException("Weight sum overflow")
+            sum += weight
+        Next
+        Dim units As Integer = raw \ stepSize
+        Dim remaining As Integer = Money.NegativeMagnitude(units)
+        Dim shares As Array Of Integer = []
+        Dim remainders As Array Of Integer = []
+        For Each weight As Integer In snapshot
+            Dim division As MoneyKitDivision = Money.DivideProduct(units, weight, sum)
+            Array.Append(shares, division.Quotient)
+            Array.Append(remainders, division.Remainder)
+            remaining -= division.Quotient
+        Next
+        ' Less than count residual units; each index can receive at most one.
+        While remaining < 0
+            Dim best As Integer = 0
+            For i As Integer = 1 To count - 1
+                If remainders(i) < remainders(best) Then best = i
+            Next
+            shares(best) -= 1
+            remainders(best) = 1
+            remaining += 1
+        End While
+        Dim output As Array Of Currency = []
+        For Each share As Integer In shares
+            If raw >= 0 Then share = -share
+            Array.Append(output, Currency.FromMinorUnits(share * stepSize))
+        Next
+        Return output
+    End Function
+End Class
