@@ -1,4 +1,4 @@
-# Compute exact currency amounts, rates and allocations
+# Exact currency amounts, rates, allocations
 
 `Import moneykit` from the sealed `moneykit-0.1.0.buipkg` in a consumer's
 `packages/` directory. No dependencies or FFI. All public methods are Shared
@@ -25,7 +25,7 @@ consumer project for reproducible installs.
 
 ## Example
 
-```buoy
+```basic
 Import moneykit
 
 Sub Main()
