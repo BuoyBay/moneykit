@@ -80,7 +80,4 @@ cross-platform native-runtime conformance is supplied. Six-target semantic
 checks establish compile-time portability only; native execution is tested on
 Linux. See resources/buoy-docs and ../../examples/moneykit/main.bui.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
-
-Weights are validated for positivity before their sum is checked, so an invalid weight takes precedence over weight-sum overflow. `Money` and `MoneyRoundingMode` are the public names; the internal division helper is package-prefixed because this toolchain does not fully hide private class names across module imports. Workspace paths above are repository-relative, not files shipped in the archive.
+Weights are validated for positivity before their sum is checked, so an invalid weight takes precedence over weight-sum overflow. `Money` and `MoneyRoundingMode` are the public names; the internal division helper is package-prefixed because this toolchain does not fully hide private class names across module imports.
