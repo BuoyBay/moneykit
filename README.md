@@ -1,4 +1,4 @@
-# Exact currency amounts, rates, allocations
+# Exact currency amounts
 
 `Import moneykit` from the sealed `moneykit-0.1.0.buipkg` in a consumer's
 `packages/` directory. No dependencies or FFI. All public methods are Shared
